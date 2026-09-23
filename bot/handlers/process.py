@@ -1,5 +1,6 @@
 import time
 import asyncio
+import re
 import uuid
 from dataclasses import replace
 from io import BytesIO
@@ -12,12 +13,19 @@ from bot.utilities.keyboards import get_all_categories
 from bot.utilities.delete import delete_last_three_messages
 from bot.messages.conversation import send_success_message
 from sheets.auth import get_service
-from sheets.sheets_manager import delete_last_transaction, write_transaction, write_transactions
+from sheets.sheets_manager import (
+    delete_last_transaction,
+    get_transaction_by_id,
+    update_transaction,
+    write_transaction,
+    write_transactions,
+)
 from utilities.category_memory import predict_category, learn_category
 from utilities.category_classifier import (
     classify_category,
     explicit_personal_category,
     match_category,
+    parse_transaction_correction,
     unrecognized_category,
 )
 from utilities.text_process import find_amount_and_description
@@ -43,6 +51,182 @@ def _write_transaction_sync(m_sum, m_cat, m_desc):
 def _write_transactions_sync(transactions):
     service = get_service()
     return write_transactions(transactions, service)
+
+
+def _get_transaction_sync(transaction_id):
+    service = get_service()
+    return get_transaction_by_id(service, SPREADSHEET_ID, transaction_id)
+
+
+def _update_transaction_sync(transaction_id, amount, category, description):
+    service = get_service()
+    return update_transaction(
+        service,
+        SPREADSHEET_ID,
+        transaction_id,
+        amount,
+        category,
+        description,
+    )
+
+
+def _transaction_id_from_reply(message, context: CallbackContext) -> str | None:
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None:
+        return None
+
+    mapped = context.user_data.get("receipt_transactions", {}).get(reply.message_id)
+    if mapped:
+        return mapped
+
+    markup = getattr(reply, "reply_markup", None)
+    for row in getattr(markup, "inline_keyboard", []) or []:
+        for button in row:
+            callback_data = getattr(button, "callback_data", "") or ""
+            if callback_data.startswith(("edit_tx:", "undo_tx:")):
+                return callback_data.split(":", 1)[1]
+    return None
+
+
+def _looks_like_correction(text: str) -> bool:
+    normalized = (text or "").casefold().replace("ё", "е").strip()
+    markers = (
+        "исправ",
+        "помен",
+        "замен",
+        "вместо",
+        "ошиб",
+        "правк",
+        "неправильно",
+        "на самом деле",
+        "это было",
+        "должно быть",
+        "должна быть",
+        "сумма",
+        "категория",
+        "описание",
+    )
+    if any(marker in normalized for marker in markers):
+        return True
+    if re.search(r"\bне\s+.+\s*,?\s*а\s+", normalized):
+        return True
+    return bool(re.fullmatch(r"\d[\d\s]*(?:[.,]\d+)?\s*(?:руб(?:ля|лей|ль)?|₽)?", normalized))
+
+
+def _correction_target_id(update: Update, context: CallbackContext, instruction: str) -> str | None:
+    message = update.message
+    reply_transaction_id = _transaction_id_from_reply(message, context)
+    if reply_transaction_id:
+        return reply_transaction_id
+    if not _looks_like_correction(instruction):
+        return None
+    return (context.user_data.get("last_tx") or {}).get("transaction_id")
+
+
+async def _apply_transaction_correction(
+    update: Update,
+    context: CallbackContext,
+    transaction_id: str,
+    instruction: str,
+    started_at: float,
+) -> None:
+    found = await asyncio.to_thread(_get_transaction_sync, transaction_id)
+    if not found:
+        await update.effective_chat.send_message("Не нашёл транзакцию, которую нужно исправить.")
+        return
+    _row_number, row = found
+    current_amount, current_category, current_description = row[3], row[4], row[5]
+
+    try:
+        correction = await asyncio.to_thread(
+            parse_transaction_correction,
+            OPENAI_API_KEY,
+            instruction,
+            current_amount,
+            current_category,
+            current_description,
+        )
+    except Exception as exc:
+        print(f"Не удалось разобрать правку транзакции: {exc}")
+        await update.effective_chat.send_message(
+            "Не смог понять правку. Например: «не 9, а 900» или «описание — такси»."
+        )
+        return
+
+    amount = correction["amount"] if correction["amount"] is not None else current_amount
+    description = correction["description"] or current_description
+    categories = get_all_categories()
+    personal_category = explicit_personal_category(instruction, categories)
+    category_hint = correction["category"]
+    description_changed = description != current_description
+
+    if personal_category:
+        category = personal_category
+    elif category_hint:
+        category = match_category(category_hint, categories)
+        if not category:
+            category = await asyncio.to_thread(
+                classify_category, OPENAI_API_KEY, category_hint, categories
+            )
+    elif description_changed:
+        remembered = match_category(await asyncio.to_thread(predict_category, description), categories)
+        if remembered:
+            category = remembered
+        else:
+            category = await asyncio.to_thread(
+                classify_category, OPENAI_API_KEY, description, categories
+            )
+    else:
+        category = current_category
+
+    if (
+        amount == current_amount
+        and description == current_description
+        and category == current_category
+    ):
+        await update.effective_chat.send_message("В правке ничего не изменилось.")
+        return
+
+    updated = await asyncio.to_thread(
+        _update_transaction_sync,
+        transaction_id,
+        amount,
+        category,
+        description,
+    )
+    if not updated:
+        await update.effective_chat.send_message("Не нашёл транзакцию, которую нужно исправить.")
+        return
+    if "нераспознан" not in category.casefold():
+        await asyncio.to_thread(learn_category, description, category)
+
+    reply = getattr(update.message, "reply_to_message", None)
+    old_confirmation_id = None
+    if reply and _transaction_id_from_reply(update.message, context) == transaction_id:
+        old_confirmation_id = reply.message_id
+    else:
+        last_tx = context.user_data.get("last_tx") or {}
+        if last_tx.get("transaction_id") == transaction_id:
+            old_confirmation_id = last_tx.get("confirmation_message_id")
+    if old_confirmation_id:
+        try:
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=old_confirmation_id,
+            )
+        except Exception:
+            pass
+        context.user_data.get("receipt_transactions", {}).pop(old_confirmation_id, None)
+
+    await send_success_message(
+        update,
+        context,
+        amount,
+        category,
+        description,
+        time.time() - started_at,
+        transaction_id=transaction_id,
+    )
 
 
 def _resolve_expense_categories(expenses: list[VoiceExpense], categories: list[str]) -> list[VoiceExpense]:
@@ -156,6 +340,17 @@ async def process_transaction_text(
         await delete_last_three_messages(update, context)
         return ConversationHandler.END
 
+    correction_target = _correction_target_id(update, context, user_message)
+    if correction_target:
+        await _apply_transaction_correction(
+            update,
+            context,
+            correction_target,
+            user_message,
+            start,
+        )
+        return ConversationHandler.END
+
     # Проверяем сообщение на удовлетворение условий бота
     if len(user_message.split()) < 2 or not any(char.isdigit() for char in user_message):
         print("Сообщение игнорировано (некорректный формат).")
@@ -236,6 +431,17 @@ async def process_voice_data(update: Update, context: CallbackContext) -> int:
             audio.getvalue(),
             "voice.ogg",
         )
+        correction_target = _correction_target_id(update, context, transcript)
+        if correction_target:
+            await status.edit_text(f"Распознано: {transcript}")
+            await _apply_transaction_correction(
+                update,
+                context,
+                correction_target,
+                transcript,
+                start,
+            )
+            return ConversationHandler.END
         expenses = await asyncio.to_thread(
             parse_expenses,
             OPENAI_API_KEY,

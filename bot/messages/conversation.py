@@ -76,6 +76,9 @@ async def send_success_message(
         "confirmation_message_id": sent.message_id,
         "transaction_id": transaction_id,
     }
+    if transaction_id:
+        receipt_transactions = context.user_data.setdefault("receipt_transactions", {})
+        receipt_transactions[sent.message_id] = transaction_id
     return sent
 
 

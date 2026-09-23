@@ -93,6 +93,21 @@ def update_transaction_category(service, spreadsheet_id, transaction_id, categor
     return row
 
 
+def update_transaction(service, spreadsheet_id, transaction_id, amount, category, description):
+    found = get_transaction_by_id(service, spreadsheet_id, transaction_id)
+    if not found:
+        return None
+    row_number, row = found
+    service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"D{row_number}:F{row_number}",
+        valueInputOption="USER_ENTERED",
+        body={"values": [[amount, category, description]]},
+    ).execute()
+    row[3:6] = [amount, category, description]
+    return row
+
+
 # Удаление последней транзакции
 def delete_last_transaction(service, SPREADSHEET_ID):
     result = service.spreadsheets().values().get(
