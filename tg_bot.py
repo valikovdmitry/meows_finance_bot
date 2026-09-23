@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -41,12 +42,17 @@ from bot.messages.conversation import (
     handle_category_button,
     cancel,
 )
+from bot.handlers.update import update_self
 
 
 READY_FILE = Path("/tmp/meows-finance-bot-ready")
 
 
 async def on_startup(application: Application) -> None:
+    try:
+        await asyncio.to_thread(update_self)
+    except Exception as exc:
+        print(f"Не удалось обновить категории при запуске: {exc}")
     await on_startup_schedule(application)
     READY_FILE.touch()
 
@@ -73,7 +79,10 @@ def main() -> None:
             MessageHandler(filters.TEXT & ~filters.COMMAND, process_data),
             MessageHandler(filters.VOICE, process_voice_data),
             MessageHandler(filters.PHOTO, process_photo_data),
-            CallbackQueryHandler(handle_post_save_action, pattern=r"^(undo_last|edit_last)$"),
+            CallbackQueryHandler(
+                handle_post_save_action,
+                pattern=r"^(undo_last|edit_last|undo_tx:[0-9a-f]+|edit_tx:[0-9a-f]+)$",
+            ),
         ],
         states={
             WAITING_FOR_CATEGORY: [

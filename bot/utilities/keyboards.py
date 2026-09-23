@@ -8,14 +8,47 @@ from telegram import (
 from utilities.file_manager import load_data_from_file
 
 
-def get_categories_for_keyboard():
+DEFAULT_CATEGORIES = [
+    " - Нормальная еда",
+    " - Аутсайт итинг",
+    " - Для дома",
+    " - Вредная еда",
+    " - Настя",
+    " - Дима",
+    " - Транспорт",
+    " - Спорт, хобби",
+    " - Медицина",
+    " - Лекарства, БАДы",
+    " - Подписки",
+    " - Терапевт",
+    " - Крупные",
+    " - Цветы",
+    " - Билеты, мероприятия",
+    " - Штрафы и проценты",
+    " - Связь",
+    " - Миск, разное",
+    " - Нераспознанное",
+    " - Кофе зерна",
+    " - Расчет",
+    " - Покупка денег",
+    " - Приход денег",
+]
+
+
+def get_all_categories():
     categories = load_data_from_file() or {}
-    result = []
-    for key in categories.keys():
-        if "нераспознан" in key.lower():
-            continue
-        result.append(key)
+    result = list(categories.keys())
+    normalized = {category.strip().lstrip("-").strip().casefold() for category in result}
+    for category in DEFAULT_CATEGORIES:
+        key = category.strip().lstrip("-").strip().casefold()
+        if key not in normalized:
+            result.append(category)
+            normalized.add(key)
     return result
+
+
+def get_categories_for_keyboard():
+    return [category for category in get_all_categories() if "нераспознан" not in category.lower()]
 
 
 def build_category_keyboard(show_all=False):
@@ -43,12 +76,14 @@ def build_category_keyboard(show_all=False):
     return InlineKeyboardMarkup(rows)
 
 
-def build_post_save_keyboard():
+def build_post_save_keyboard(transaction_id=None):
+    undo_callback = f"undo_tx:{transaction_id}" if transaction_id else "undo_last"
+    edit_callback = f"edit_tx:{transaction_id}" if transaction_id else "edit_last"
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(text="↩️ Отменить", callback_data="undo_last"),
-                InlineKeyboardButton(text="✏️ Изменить категорию", callback_data="edit_last"),
+                InlineKeyboardButton(text="↩️ Отменить", callback_data=undo_callback),
+                InlineKeyboardButton(text="✏️ Изменить категорию", callback_data=edit_callback),
             ]
         ]
     )

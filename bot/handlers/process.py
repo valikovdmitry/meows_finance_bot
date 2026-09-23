@@ -1,19 +1,25 @@
 import time
 import asyncio
 import uuid
+from dataclasses import replace
 from io import BytesIO
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackContext, ConversationHandler
 
 from config import OPENAI_API_KEY, SPREADSHEET_ID
-from bot.states import WAITING_FOR_CATEGORY
-from bot.utilities.keyboards import build_category_keyboard, get_categories_for_keyboard
+from bot.utilities.keyboards import get_all_categories
 from bot.utilities.delete import delete_last_three_messages
 from bot.messages.conversation import send_success_message
 from sheets.auth import get_service
 from sheets.sheets_manager import delete_last_transaction, write_transaction, write_transactions
 from utilities.category_memory import predict_category, learn_category
+from utilities.category_classifier import (
+    classify_category,
+    explicit_personal_category,
+    match_category,
+    unrecognized_category,
+)
 from utilities.text_process import find_amount_and_description
 from utilities.voice_expense import (
     VoiceExpense,
@@ -31,12 +37,28 @@ def _delete_last_transaction_sync():
 
 def _write_transaction_sync(m_sum, m_cat, m_desc):
     service = get_service()
-    write_transaction(m_sum, m_cat, m_desc, service)
+    return write_transaction(m_sum, m_cat, m_desc, service)
 
 
 def _write_transactions_sync(transactions):
     service = get_service()
-    write_transactions(transactions, service)
+    return write_transactions(transactions, service)
+
+
+def _resolve_expense_categories(expenses: list[VoiceExpense], categories: list[str]) -> list[VoiceExpense]:
+    resolved = []
+    fallback = unrecognized_category(categories)
+    for expense in expenses:
+        personal = explicit_personal_category(expense.description, categories)
+        remembered = match_category(predict_category(expense.description), categories)
+        model_category = match_category(expense.category, categories)
+        model_personal = model_category if model_category in {
+            match_category("Дима", categories),
+            match_category("Настя", categories),
+        } else None
+        category = personal or model_personal or remembered or model_category or fallback
+        resolved.append(replace(expense, category=category))
+    return resolved
 
 
 def _format_rubles(amount) -> str:
@@ -60,13 +82,6 @@ async def _request_batch_confirmation(
     expenses: list[VoiceExpense],
     source_message_id: int,
 ) -> int:
-    unresolved = [expense.description for expense in expenses if not expense.category]
-    if unresolved:
-        await update.effective_chat.send_message(
-            "Не смог определить категории для: " + ", ".join(unresolved) + ". Уточни их текстом."
-        )
-        return ConversationHandler.END
-
     batch_id = uuid.uuid4().hex[:12]
     context.user_data["pending_batch"] = {
         "id": batch_id,
@@ -104,9 +119,10 @@ async def handle_batch_action(update: Update, context: CallbackContext) -> int:
     transactions = pending["transactions"]
     context.user_data.pop("pending_batch", None)
     try:
-        await asyncio.to_thread(_write_transactions_sync, transactions)
+        transaction_ids = await asyncio.to_thread(_write_transactions_sync, transactions)
         for _amount, category, description in transactions:
-            await asyncio.to_thread(learn_category, description, category)
+            if "нераспознан" not in category.casefold():
+                await asyncio.to_thread(learn_category, description, category)
     except Exception as exc:
         print(f"Не удалось записать пакет транзакций: {exc}")
         context.user_data["pending_batch"] = pending
@@ -114,6 +130,16 @@ async def handle_batch_action(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
 
     await query.edit_message_text(f"Записано строк: {len(transactions)}.")
+    for transaction_id, (amount, category, description) in zip(transaction_ids, transactions):
+        await send_success_message(
+            update,
+            context,
+            amount,
+            category,
+            description,
+            None,
+            transaction_id=transaction_id,
+        )
     return ConversationHandler.END
 
 
@@ -135,7 +161,7 @@ async def process_transaction_text(
         print("Сообщение игнорировано (некорректный формат).")
         return  # Просто выходим из функции
 
-    # Всегда сначала берем сумму и описание, а категорию выбираем отдельным шагом.
+    # Сначала извлекаем сумму и описание, затем автоматически определяем категорию.
     m_sum, m_desc = find_amount_and_description(user_message)
     if not m_sum:
         await update.effective_chat.send_message("Не смог распознать сумму. Пример: 150 кофе")
@@ -148,35 +174,36 @@ async def process_transaction_text(
     if source_message_id is None and update.message:
         source_message_id = update.message.message_id
 
-    predicted_category = await asyncio.to_thread(predict_category, m_desc)
-    if predicted_category:
-        await asyncio.to_thread(_write_transaction_sync, m_sum, predicted_category, m_desc)
-        await asyncio.to_thread(learn_category, m_desc, predicted_category)
-        elapsed_time = time.time() - start
-        await send_success_message(
-            update,
-            context,
-            m_sum,
-            predicted_category,
-            m_desc,
-            elapsed_time,
-            source_message_id=source_message_id,
-        )
-        return ConversationHandler.END
+    categories = get_all_categories()
+    personal_category = explicit_personal_category(m_desc, categories)
+    remembered_category = match_category(await asyncio.to_thread(predict_category, m_desc), categories)
+    if personal_category:
+        category = personal_category
+    elif remembered_category:
+        category = remembered_category
+    else:
+        try:
+            category = await asyncio.to_thread(
+                classify_category, OPENAI_API_KEY, m_desc, categories
+            )
+        except Exception as exc:
+            print(f"Не удалось определить категорию через OpenAI: {exc}")
+            category = unrecognized_category(categories)
 
-    prompt_message = await update.effective_chat.send_message(
-        "Выбери категорию:",
-        reply_markup=build_category_keyboard(),
+    transaction_id = await asyncio.to_thread(_write_transaction_sync, m_sum, category, m_desc)
+    if "нераспознан" not in category.casefold():
+        await asyncio.to_thread(learn_category, m_desc, category)
+    await send_success_message(
+        update,
+        context,
+        m_sum,
+        category,
+        m_desc,
+        time.time() - start,
+        source_message_id=source_message_id,
+        transaction_id=transaction_id,
     )
-    context.user_data["pending_tx"] = {
-        "m_sum": m_sum,
-        "m_desc": m_desc,
-        "memory_desc": m_desc,
-        "source_message_id": source_message_id,
-        "prompt_message_id": prompt_message.message_id,
-    }
-    context.user_data["start_time"] = start
-    return WAITING_FOR_CATEGORY
+    return ConversationHandler.END
 
 
 async def process_data(update: Update, context: CallbackContext) -> int:
@@ -213,8 +240,9 @@ async def process_voice_data(update: Update, context: CallbackContext) -> int:
             parse_expenses,
             OPENAI_API_KEY,
             transcript,
-            get_categories_for_keyboard(),
+            get_all_categories(),
         )
+        expenses = _resolve_expense_categories(expenses, get_all_categories())
         expenses = group_expenses_by_category(expenses)
     except Exception as exc:
         print(f"Не удалось обработать голосовое сообщение: {exc}")
@@ -235,35 +263,21 @@ async def process_voice_data(update: Update, context: CallbackContext) -> int:
         return await _request_batch_confirmation(update, context, expenses, message.message_id)
 
     expense = expenses[0]
-    if expense.category:
-        amount, category, description = expense.transaction_fields()
-        await asyncio.to_thread(_write_transaction_sync, amount, category, description)
+    amount, category, description = expense.transaction_fields()
+    transaction_id = await asyncio.to_thread(_write_transaction_sync, amount, category, description)
+    if "нераспознан" not in category.casefold():
         await asyncio.to_thread(learn_category, description, category)
-        await send_success_message(
-            update,
-            context,
-            amount,
-            category,
-            description,
-            time.time() - start,
-            source_message_id=message.message_id,
-        )
-        return ConversationHandler.END
-
-    amount = float(expense.amount_rub)
-    prompt_message = await update.effective_chat.send_message(
-        "Не смог уверенно выбрать категорию. Выбери её:",
-        reply_markup=build_category_keyboard(),
+    await send_success_message(
+        update,
+        context,
+        amount,
+        category,
+        description,
+        time.time() - start,
+        source_message_id=message.message_id,
+        transaction_id=transaction_id,
     )
-    context.user_data["pending_tx"] = {
-        "m_sum": amount,
-        "m_desc": expense.description,
-        "memory_desc": expense.description,
-        "source_message_id": message.message_id,
-        "prompt_message_id": prompt_message.message_id,
-    }
-    context.user_data["start_time"] = time.time()
-    return WAITING_FOR_CATEGORY
+    return ConversationHandler.END
 
 
 async def process_photo_data(update: Update, context: CallbackContext) -> int:
@@ -288,8 +302,9 @@ async def process_photo_data(update: Update, context: CallbackContext) -> int:
             OPENAI_API_KEY,
             image.getvalue(),
             "image/jpeg",
-            get_categories_for_keyboard(),
+            get_all_categories(),
         )
+        expenses = _resolve_expense_categories(expenses, get_all_categories())
         expenses = group_expenses_by_category(expenses)
     except Exception as exc:
         print(f"Не удалось обработать фото чека: {exc}")
