@@ -15,7 +15,6 @@ DAILY_EXPENSE_REMINDERS_ENABLED = os.getenv("DAILY_EXPENSE_REMINDERS_ENABLED", "
     "on",
 )
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-BOT_API_KEY = os.getenv("BOT_API_KEY")
 
 # Путь к Google API ключу
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

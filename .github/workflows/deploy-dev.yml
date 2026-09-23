@@ -1,24 +1,114 @@
-name: Deploy Dev
+name: Build and Deploy Dev
 
 on:
   push:
     branches:
       - dev
 
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      image_ref: ${{ steps.image.outputs.image_ref }}
     steps:
-      - name: Deploy on server via SSH
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set image reference
+        id: image
+        run: echo "image_ref=${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.image_ref }}
+            ${{ env.IMAGE_NAME }}:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_REF: ${{ needs.build.outputs.image_ref }}
+      GHCR_USERNAME: ${{ github.actor }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+    steps:
+      - name: Check out deployment configuration
+        uses: actions/checkout@v4
+
+      - name: Upload Docker Compose configuration
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.DEV_SERVER_HOST }}
+          username: ${{ secrets.DEV_SERVER_USER }}
+          key: ${{ secrets.DEV_SERVER_SSH_KEY }}
+          source: docker-compose.yml
+          target: ${{ secrets.DEV_SERVER_APP_DIR }}
+
+      - name: Deploy ready image via SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.DEV_SERVER_HOST }}
           username: ${{ secrets.DEV_SERVER_USER }}
           key: ${{ secrets.DEV_SERVER_SSH_KEY }}
+          envs: IMAGE_REF,GHCR_USERNAME,GHCR_TOKEN,TELEGRAM_BOT_TOKEN,SPREADSHEET_ID,OPENAI_API_KEY,GOOGLE_CREDENTIALS_B64
           script: |
-            set -e
+            set -eu
             cd "${{ secrets.DEV_SERVER_APP_DIR }}"
-            git fetch origin dev
-            git checkout dev
-            git pull --ff-only origin dev
-            docker compose up -d --build
+
+            umask 077
+            mkdir -p data
+            printf 'TOKEN=%s\nSPREADSHEET_ID=%s\nOPENAI_API_KEY=%s\nBOT_TIMEZONE=Asia/Ho_Chi_Minh\nDAILY_EXPENSE_REMINDERS_ENABLED=false\n' \
+              "$TELEGRAM_BOT_TOKEN" "$SPREADSHEET_ID" "$OPENAI_API_KEY" > .env
+            printf '%s' "$GOOGLE_CREDENTIALS_B64" | base64 --decode > data/creds.json
+
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+
+            previous_image=$(docker inspect --format '{{.Config.Image}}' meows-finance-bot-dev 2>/dev/null || true)
+
+            BOT_IMAGE="$IMAGE_REF" docker compose pull bot
+            docker logout ghcr.io >/dev/null
+            BOT_IMAGE="$IMAGE_REF" docker compose up -d --no-deps --remove-orphans bot
+
+            health="starting"
+            attempts=0
+            while [ "$health" = "starting" ] && [ "$attempts" -lt 12 ]; do
+              sleep 5
+              health=$(docker inspect --format '{{.State.Health.Status}}' meows-finance-bot-dev 2>/dev/null || true)
+              attempts=$((attempts + 1))
+            done
+
+            if [ "$health" != "healthy" ]; then
+              docker logs --tail 100 meows-finance-bot-dev || true
+              if [ -n "$previous_image" ]; then
+                BOT_IMAGE="$previous_image" docker compose up -d --no-deps bot
+              fi
+              exit 1
+            fi
+
+            docker image prune -a -f --filter "until=168h"

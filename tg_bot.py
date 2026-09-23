@@ -1,3 +1,6 @@
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -7,7 +10,6 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
-from zoneinfo import ZoneInfo
 
 from config import TOKEN, BOT_TIMEZONE
 from bot.states import WAITING_FOR_CATEGORY
@@ -41,7 +43,16 @@ from bot.messages.conversation import (
 )
 
 
+READY_FILE = Path("/tmp/meows-finance-bot-ready")
 
+
+async def on_startup(application: Application) -> None:
+    await on_startup_schedule(application)
+    READY_FILE.touch()
+
+
+async def on_shutdown(application: Application) -> None:
+    READY_FILE.unlink(missing_ok=True)
 
 
 # Основная функция для запуска бота
@@ -51,7 +62,8 @@ def main() -> None:
         Application.builder()
         .token(TOKEN)
         .defaults(Defaults(tzinfo=ZoneInfo(BOT_TIMEZONE)))
-        .post_init(on_startup_schedule)
+        .post_init(on_startup)
+        .post_shutdown(on_shutdown)
         .build()
     )
 

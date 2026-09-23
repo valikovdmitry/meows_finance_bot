@@ -1,22 +1,22 @@
 services:
   bot:
-    build: .
+    image: ${BOT_IMAGE:-ghcr.io/valikovdmitry/meows_finace_bot:dev}
     container_name: meows-finance-bot-dev
-    restart: always
+    restart: unless-stopped
+    init: true
+    mem_limit: 512m
     env_file:
       - .env
     volumes:
       - ./data:/app/data
-    command: python main.py
-
-  api:
-    build: .
-    container_name: meows-finance-api-dev
-    restart: always
-    env_file:
-      - .env
-    volumes:
-      - ./data:/app/data
-    ports:
-      - "127.0.0.1:8080:8000"
-    command: uvicorn api:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/meows-finance-bot-ready"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
