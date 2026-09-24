@@ -14,9 +14,27 @@ from utilities.category_classifier import (
 )
 
 
-TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
+TRANSCRIPTION_MODEL = "gpt-transcribe"
 EXPENSE_PARSING_MODEL = "gpt-4o-mini"
 AUTO_VND_THRESHOLD = Decimal("50000")
+TRANSCRIPTION_LANGUAGES = ["ru", "en"]
+TRANSCRIPTION_KEYWORDS = [
+    "About Us",
+    "USDT",
+    "VND",
+    "Grab",
+    "Shopee",
+    "Telegram",
+    "ChatGPT",
+    "Anthropic",
+    "OpenAI",
+]
+TRANSCRIPTION_PROMPT = """Это короткое голосовое сообщение о финансовой транзакции.
+Основной язык — русский, но в речи встречаются английские названия заведений, брендов и сервисов.
+Особенно точно записывай суммы и другие числа: не заменяй одно услышанное число другим.
+Английские названия сохраняй латиницей и не превращай их в похожие русские слова.
+Например, название заведения About Us нужно записывать именно как About Us.
+Сохраняй валюты RUB, VND и USDT в общепринятом написании."""
 
 
 @dataclass(frozen=True)
@@ -80,7 +98,11 @@ def transcribe_voice(api_key: str, audio_bytes: bytes, filename: str = "voice.og
     response = client.audio.transcriptions.create(
         model=TRANSCRIPTION_MODEL,
         file=(filename, audio_bytes),
-        language="ru",
+        prompt=TRANSCRIPTION_PROMPT,
+        extra_body={
+            "keywords": TRANSCRIPTION_KEYWORDS,
+            "languages": TRANSCRIPTION_LANGUAGES,
+        },
     )
     transcript = (response.text or "").strip()
     if not transcript:
