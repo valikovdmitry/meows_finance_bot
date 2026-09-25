@@ -41,19 +41,26 @@ def _short(value, limit=34):
 
 
 def _list_content(rows, offset, total):
-    text = "<b>Последние транзакции</b>"
+    lines = ["<b>Последние транзакции</b>"]
     buttons = []
     transaction_buttons = []
     for index, row in enumerate(rows, start=1):
-        transaction_id, _date, _time, amount, _category, description = row
+        transaction_id, date, time, amount, category, description = row
         number = offset + index
+        lines.extend(
+            [
+                "",
+                f"<b>{number}. {html.escape(str(amount))} ₽ · {html.escape(_short(description, 45))}</b>",
+                f"{html.escape(_clean_category(category))} · {html.escape(str(date))} {html.escape(str(time))}",
+            ]
+        )
         transaction_buttons.append(
             InlineKeyboardButton(
-                f"{number}. {_short(amount, 10)} ₽ · {_short(description, 16)}",
+                str(number),
                 callback_data=f"recent_view:{transaction_id}:{offset}",
             )
         )
-        if len(transaction_buttons) == 2:
+        if len(transaction_buttons) == 3:
             buttons.append(transaction_buttons)
             transaction_buttons = []
     if transaction_buttons:
@@ -76,7 +83,7 @@ def _list_content(rows, offset, total):
             InlineKeyboardButton("Закрыть", callback_data="recent_close"),
         ]
     )
-    return text, InlineKeyboardMarkup(buttons)
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 async def _render_list(update: Update, context: CallbackContext, offset=0):
