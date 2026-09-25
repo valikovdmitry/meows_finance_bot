@@ -115,6 +115,9 @@ def _looks_like_correction(text: str) -> bool:
 
 def _correction_target_id(update: Update, context: CallbackContext, instruction: str) -> str | None:
     message = update.message
+    pending_recent_edit = context.user_data.get("pending_recent_edit") or {}
+    if pending_recent_edit.get("transaction_id"):
+        return pending_recent_edit["transaction_id"]
     reply_transaction_id = _transaction_id_from_reply(message, context)
     if reply_transaction_id:
         return reply_transaction_id
@@ -199,6 +202,19 @@ async def _apply_transaction_correction(
         return
     if "нераспознан" not in category.casefold():
         await asyncio.to_thread(learn_category, description, category)
+
+    pending_recent_edit = context.user_data.get("pending_recent_edit") or {}
+    if pending_recent_edit.get("transaction_id") == transaction_id:
+        context.user_data.pop("pending_recent_edit", None)
+        prompt_message_id = pending_recent_edit.get("prompt_message_id")
+        if prompt_message_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=prompt_message_id,
+                )
+            except Exception:
+                pass
 
     reply = getattr(update.message, "reply_to_message", None)
     old_confirmation_id = None

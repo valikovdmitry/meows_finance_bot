@@ -159,5 +159,33 @@ def get_transactions(service, SPREADSHEET_ID):
     return result.get("values", [])
 
 
+def get_formatted_transactions(service, spreadsheet_id):
+    result = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range="A2:F10000",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute()
+    return result.get("values", [])
+
+
+def get_recent_transactions(service, spreadsheet_id, offset=0, limit=5):
+    rows = []
+    for row in get_formatted_transactions(service, spreadsheet_id):
+        if not row or not row[0]:
+            continue
+        padded = list(row) + [""] * (6 - len(row))
+        rows.append(padded[:6])
+    rows.reverse()
+    return rows[offset:offset + limit], len(rows)
+
+
+def get_formatted_transaction_by_id(service, spreadsheet_id, transaction_id):
+    for row in get_formatted_transactions(service, spreadsheet_id):
+        if row and str(row[0]) == str(transaction_id):
+            padded = list(row) + [""] * (6 - len(row))
+            return padded[:6]
+    return None
+
+
 # if __name__ == '__main__':
 #     write_transaction()
