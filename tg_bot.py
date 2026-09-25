@@ -117,7 +117,7 @@ def main() -> None:
     application.add_handler(CommandHandler("reminders", reminders_list))
     application.add_handler(CommandHandler("last", show_recent_transactions))
     application.add_handler(
-        MessageHandler(filters.Regex("^Последние транзакции$"), show_recent_transactions)
+        MessageHandler(filters.Regex(r"^(?:📋 )?Последние транзакции$"), show_recent_transactions)
     )
     application.add_handler(MessageHandler(filters.Regex("^Update$"), quick_update))
     application.add_handler(MessageHandler(filters.Regex("^Тест$"), quick_test))
