@@ -92,8 +92,10 @@ def build_post_save_keyboard(transaction_id=None):
 def build_main_keyboard():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("📋 Последние транзакции")],
-            [KeyboardButton("Update"), KeyboardButton("Тест"), KeyboardButton("Дожим сейчас")],
+            [
+                KeyboardButton("📋 Последние транзакции"),
+                KeyboardButton("🧮 Расчёт"),
+            ],
         ],
         resize_keyboard=True,
         one_time_keyboard=False,

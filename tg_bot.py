@@ -37,6 +37,7 @@ from bot.handlers.custom_reminders import handle_custom_reminder_ok
 from bot.handlers.reports import today_report, week_report, month_report, category_report
 from bot.handlers.process import handle_batch_action, process_data, process_photo_data, process_voice_data
 from bot.handlers.recent_transactions import handle_recent_action, show_recent_transactions
+from bot.handlers.settlement import show_settlement
 from bot.messages.conversation import (
     handle_category,
     handle_post_save_action,
@@ -118,6 +119,9 @@ def main() -> None:
     application.add_handler(CommandHandler("last", show_recent_transactions))
     application.add_handler(
         MessageHandler(filters.Regex(r"^(?:📋 )?Последние транзакции$"), show_recent_transactions)
+    )
+    application.add_handler(
+        MessageHandler(filters.Regex(r"^(?:🧮 )?Расч[её]т$"), show_settlement)
     )
     application.add_handler(MessageHandler(filters.Regex("^Update$"), quick_update))
     application.add_handler(MessageHandler(filters.Regex("^Тест$"), quick_test))
