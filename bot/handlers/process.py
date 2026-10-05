@@ -29,6 +29,7 @@ from utilities.category_classifier import (
     unrecognized_category,
 )
 from utilities.text_process import find_amount_and_description
+from utilities.currency import normalize_amount
 from utilities.voice_expense import (
     VoiceExpense,
     group_expenses_by_category,
@@ -157,6 +158,10 @@ async def _apply_transaction_correction(
         return
 
     amount = correction["amount"] if correction["amount"] is not None else current_amount
+    correction_conversion = None
+    if correction["amount"] is not None:
+        correction_conversion = normalize_amount(amount, instruction)
+        amount = float(correction_conversion.amount_rub)
     description = correction["description"] or current_description
     categories = get_all_categories()
     personal_category = explicit_personal_category(instruction, categories)
@@ -243,6 +248,11 @@ async def _apply_transaction_correction(
         time.time() - started_at,
         transaction_id=transaction_id,
     )
+    if correction_conversion and correction_conversion.was_converted:
+        await update.effective_chat.send_message(
+            f"Конвертация: {correction_conversion.source_amount} VND → "
+            f"{_format_rubles(correction_conversion.amount_rub)} ₽"
+        )
 
 
 def _resolve_expense_categories(expenses: list[VoiceExpense], categories: list[str]) -> list[VoiceExpense]:
@@ -270,7 +280,13 @@ def _batch_preview(expenses: list[VoiceExpense]) -> str:
     lines = [f"Нашёл {len(expenses)} трат:"]
     for expense in expenses:
         category = expense.category or "не распознана"
-        lines.append(f"• {_format_rubles(expense.amount_rub)} ₽ — {category.strip(' -')} — {expense.description}")
+        conversion = ""
+        if expense.source_currency == "VND":
+            conversion = f" ({expense.source_amount} VND)"
+        lines.append(
+            f"• {_format_rubles(expense.amount_rub)} ₽{conversion} — "
+            f"{category.strip(' -')} — {expense.description}"
+        )
     total = sum((expense.amount_rub for expense in expenses), start=0)
     lines.append(f"\nИтого: {_format_rubles(total)} ₽")
     return "\n".join(lines)
@@ -382,6 +398,9 @@ async def process_transaction_text(
         await update.effective_chat.send_message("Добавь описание после суммы. Пример: 150 кофе")
         return ConversationHandler.END
 
+    normalized_amount = normalize_amount(m_sum, user_message)
+    m_sum = float(normalized_amount.amount_rub)
+
     if source_message_id is None and update.message:
         source_message_id = update.message.message_id
 
@@ -414,6 +433,11 @@ async def process_transaction_text(
         source_message_id=source_message_id,
         transaction_id=transaction_id,
     )
+    if normalized_amount.was_converted:
+        await update.effective_chat.send_message(
+            f"Конвертация: {normalized_amount.source_amount} VND → "
+            f"{_format_rubles(normalized_amount.amount_rub)} ₽"
+        )
     return ConversationHandler.END
 
 

@@ -35,22 +35,29 @@ def _normalize_text(text):
 
 
 def _extract_amount(text):
-    # Поддержка: 150, 150к, 150k, 120000, 120,5
-    match = re.search(r"(\d+(?:[.,]\d+)?)(?:\s*([кk])\b)?", text.lower())
+    # Поддержка: 150, 150к, 200 тысяч, 3 миллиона, 3 000 000, 120,5.
+    match = re.search(
+        r"(?<!\w)"
+        r"((?:\d{1,3}(?:[\s\u00a0]\d{3})+|\d+)(?:[.,]\d+)?)"
+        r"(?:\s*(к|k|тыс(?:яча|ячи|ячу|яч)?|млн|миллион(?:а|ов)?))?"
+        r"(?:\s*(?:vnd|₫|вьетнамск\w*\s+донг\w*|донг\w*|rub|rur|₽|руб\w*))?",
+        text.casefold().replace("ё", "е"),
+        flags=re.UNICODE,
+    )
     if not match:
         return 0, text
 
-    raw_num = match.group(1).replace(",", ".")
+    raw_num = match.group(1).replace(" ", "").replace("\u00a0", "").replace(",", ".")
     suffix = match.group(2)
     try:
         amount = float(raw_num)
     except ValueError:
         return 0, text
 
-    # Без суффикса значение трактуется как рубли "как есть".
-    # Суффикс к/k означает тысячи рублей.
-    if suffix:
+    if suffix in {"к", "k"} or (suffix and suffix.startswith("тыс")):
         amount *= 1000
+    elif suffix in {"млн", "миллион", "миллиона", "миллионов"}:
+        amount *= 1_000_000
 
     text_without_amount = (text[:match.start()] + " " + text[match.end():]).strip()
     text_without_amount = re.sub(r"\s+", " ", text_without_amount)
